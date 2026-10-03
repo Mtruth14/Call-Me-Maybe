@@ -51,8 +51,13 @@ The same paths can be given to `make` (`make run INPUT=my_prompts.json`). An opt
 **Output file**: a JSON array of `{"prompt", "name", "parameters"}` objects, in the
 order of the input prompts.
 
-**Errors**: a missing file, invalid JSON or an invalid entry gives a one-line
-message on `stderr` and exit code 1, never a traceback.
+**Errors**
+
+- A missing file, invalid JSON or an invalid entry gives a one-line message on
+  `stderr` and exit code 1, never a traceback.
+- A prompt that cannot be decoded (invalid value, exhausted budget...) is reported
+  on `stderr` with the reason. It is **skipped**: it does not appear in the output
+  array, and the program goes on with the next prompt.
 
 ## Architecture & Algorithm
 
@@ -80,11 +85,11 @@ have no text and are never allowed.
 
 An automaton describes the text of **one value**, character by character.
 
-| Automaton          | Used for                      | Accepted text                                         |
-| ------------------ | ----------------------------- | ----------------------------------------------------- |
-| `NumberAutomaton`  | `number`, `integer`           | `-?(0\|[1-9][0-9]*)`, plus `(\.[0-9]+)?` for `number` |
-| `StringAutomaton`  | `string`                      | body of a JSON string: no control char, valid escapes |
-| `ChoiceAutomaton`  | function name, `boolean`, `null`, `enum` | one of a closed list of literals           |
+| Automaton          | Used for                                 | Accepted text                                         |
+| ------------------ | ---------------------------------------- | ----------------------------------------------------- |
+| `NumberAutomaton`  | `number`, `integer`                      | `-?(0\|[1-9][0-9]*)`, plus `(\.[0-9]+)?` for `number` |
+| `StringAutomaton`  | `string`                                 | body of a JSON string: no control char, valid escapes |
+| `ChoiceAutomaton`  | function name, `boolean`, `null`, `enum` | one of a closed list of literals                      |
 
 A token is allowed from a state if the automaton accepts all its characters in
 order. If the value ends in the middle of a token, the rest is dropped (the token
@@ -115,9 +120,13 @@ the **value of each argument**.
 3. **Value loop.** At each step: logits → mask of the current state → `argmax` →
    the automaton consumes the token. If only one continuation is possible, it is
    appended without a model call.
-4. **Budget.** A value has its own token budget. If it is exhausted, the value is
-   closed with the shortest valid completion (closing quote for a string, a valid
-   number for a number).
+4. **Budget.** A value has its own token budget (64 tokens by default). If it is
+   exhausted, the value is closed with the shortest valid completion (closing quote
+   for a string, a valid number for a number).
+5. **Strings are unescaped.** The model writes the *body of a JSON string*, so it must
+   write `\\d+` to mean the regex `\d+`. The decoder parses the body with `json.loads`
+   to get the real value (`\d+`). Without this step the escaping would be applied
+   twice when the result is written to the output file.
 
 Two prompts are used. The first one lists the functions (names and descriptions) and
 is used to choose the name. The second one contains only the chosen function with its
@@ -149,8 +158,7 @@ converted to `float` (`40` becomes `40.0`). Each output entry is a Pydantic mode
 - **No exponent notation** for numbers. It is never needed to read a value from a
   sentence, and it can overflow to `inf`, which is not valid JSON.
 - **Errors are reported, not hidden.** A prompt that cannot be decoded is reported on
-  `stderr` with the reason. Errors are reported, not hidden. A prompt that cannot be decoded is reported on
-stderr with the reason, and skipped in the final JSON array (or represented with null parameters depending on the strict mode requirement).
+  `stderr` with the reason, and skipped in the final JSON array.
 
 ## Performance analysis
 
@@ -161,11 +169,9 @@ stderr with the reason, and skipped in the final JSON array (or represented with
   the prompt.
 - **Speed.** One forward pass per model-chosen token. The SDK exposes no KV cache, so
   the whole sequence is recomputed at each step. Forced text and single-choice steps
-  cost no forward pass. The total time is printed at the end of a run.
-  Speed. One forward pass per model-chosen token. The SDK exposes no KV cache, so
-the whole sequence is recomputed at each step. Forced text and single-choice steps
-cost no forward pass. The total time on the 11 test prompts was ~55.76 seconds on 
-the workstation machine (processed 11 prompts successfully).
+  cost no forward pass. The total time is printed at the end of a run. On the 11
+  provided test prompts it was about 55.76 seconds on the workstation machine, with
+  all 11 prompts processed.
 - **Memory.** The model, plus one boolean mask per cached state.
 
 ## Known limitations
@@ -176,6 +182,9 @@ the workstation machine (processed 11 prompts successfully).
 - Tokens that are fragments of a multi-byte character are never generated, so a
   character can only be produced by a token that contains it entirely.
 - No KV cache, so long prompts make each step slower.
+- Function names that are a prefix of another name (for example `fn_get` and
+  `fn_get_x`) are not handled: the choice stops as soon as a complete name is reached.
+- The budget of 64 tokens per value can cut a very long string short.
 
 ## Challenges
 
@@ -188,12 +197,14 @@ the workstation machine (processed 11 prompts successfully).
   text so far is a complete number.
 - **Backslashes in strings.** A regular expression such as `\d+` must be written
   `\\d+` in JSON. The string automaton accepts only valid escapes, so the output is
-  always parseable.
+  always parseable. The generated body is then parsed with `json.loads`, so the
+  final value is `\d+` and not `\\d+`.
 - **Small model.** It needs a short, focused prompt. Rebuilding the prompt around the
   single chosen function improved the extraction of arguments.
 
-In addition: `make lint` and `make lint-strict`, and runs on the provided sample files
-and on hand-made input files (missing file, invalid JSON, wrong shape, empty list).
+In addition: `make lint` and `make lint-strict` pass, and the program was run on the
+provided sample files and on hand-made input files (missing file, invalid JSON, wrong
+shape, empty list).
 
 ## Resources
 
@@ -201,7 +212,7 @@ and on hand-made input files (missing file, invalid JSON, wrong shape, empty lis
 - GPT-2 byte-to-unicode table (OpenAI).
 - JSON grammar: [json.org](https://www.json.org).
 - Articles on constrained / structured decoding (logit masking).
-- Pydantic v2 and pytest documentation.
+- Pydantic v2 documentation.
 
 **Use of AI:** an AI assistant was used to review the code, to design the module
 structure, and to help write this README. The code can be explained by its author.
