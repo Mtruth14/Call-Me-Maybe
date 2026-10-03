@@ -136,7 +136,12 @@ class ConstrainedDecoder:
                 raw_val = self._generate_value(ids, automaton)
                 if raw_val.endswith('"'):
                     raw_val = raw_val[:-1]
-                parsed_val = raw_val
+                try:
+                    parsed_val = json.loads(f'"{raw_val}"')
+                except json.JSONDecodeError as err:
+                    raise DecodingError(
+                        f"Invalid string value '{raw_val}': {err}"
+                    ) from err
             else:
                 automaton = automaton_for(param_spec)
                 raw_val = self._generate_value(ids, automaton)
